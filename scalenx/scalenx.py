@@ -296,6 +296,160 @@ def scale3x(image3d: list[list[list[int]]]) -> list[list[list[int]]]:
 # ↑ rescaling three times finished
 
 
+""" ╔════════════════════════════════════════════╗
+    ║ xBR-style 2x rescaling with anti-aliasing  ║
+    ╚════════════════════════════════════════════╝ """
+
+
+def xbr2x(image3d: list[list[list[int]]], blend: float = 0.5, keep_palette: bool = False) -> tuple[str, list[list[list[int]]] | None]:
+    """xBR-style 2x image rescale with anti-aliased diagonal edges.
+    ----
+
+    Edge and corner detection uses the same four-neighbourhood
+    (up, right, left, down) decision tree as Scale2x; however,
+    instead of hard-copying the "winning" neighbour into output,
+    the neighbour colour is mixed into the central pixel colour
+    with configurable weight, producing smooth anti-aliased
+    transitions along diagonal edges instead of staircase steps.
+
+    :param image3d: 3D nested list (image) of lists (rows) of lists (pixels)
+        of int (channel values); coordinate system match Photoshop, *i.e.*
+        origin is top left corner, channels order is LA or RGBA from 0 to top;
+    :type image3d: list[list[list[int]]]
+    :param blend: anti-aliasing mix strength, number from 0.0 (no mixing,
+        output equal to nearest neighbour) to 1.0 (full neighbour colour,
+        output equal to Scale2x);
+    :type blend: float
+    :param keep_palette: if True, every mixed colour is snapped to the nearest
+        colour from the source pixel 3x3 neighbourhood, so that output
+        contains source palette colours only;
+    :type keep_palette: bool
+    :raises TypeError: ``blend`` is not a number, or ``keep_palette`` is not a bool;
+    :raises ValueError: ``blend`` is out of [0.0, 1.0] range, or ``image3d``
+        is empty or ragged;
+    :return: tuple ``(status, image)``. ``status='ok'`` with rescaled image
+        for source 3x3 and bigger; ``status='too_small'`` with ``image=None``
+        for source smaller than 3x3 in any dimension.
+    :rtype: tuple[str, list[list[list[int]]] | None]
+
+    """
+
+    if isinstance(blend, bool) or not isinstance(blend, (int, float)):
+        raise TypeError(f'blend must be a number in [0.0, 1.0] range, got {type(blend).__name__}')
+    if not 0.0 <= blend <= 1.0:
+        raise ValueError(f'blend must be in [0.0, 1.0] range, got {blend}')
+    if not isinstance(keep_palette, bool):
+        raise TypeError(f'keep_palette must be a bool, got {type(keep_palette).__name__}')
+    if not isinstance(image3d, list) or len(image3d) == 0 or not isinstance(image3d[0], list) or len(image3d[0]) == 0:
+        raise ValueError('image3d must be a non-empty list of non-empty row lists')
+
+    # ↓ determining source image size from list
+    Y, X = (len(image3d), len(image3d[0]))
+
+    if any(len(row) != X for row in image3d):
+        raise ValueError('image3d must be rectangular (all rows of the same length)')
+
+    if X < 3 or Y < 3:
+        return ('too_small', None)
+
+    weight = float(blend)
+
+    def _mix(base: list[int], other: list[int]) -> list[int]:
+        """Anti-aliasing blend of ``other`` neighbour colour into ``base`` colour."""
+
+        return [round(b + (o - b) * weight) for b, o in zip(base, other)]
+
+    def _snap(mixed: list[int], candidates: list[tuple[int, ...]]) -> list[int]:
+        """Snap ``mixed`` colour to the nearest of ``candidates`` palette colours."""
+
+        best = candidates[0]
+        best_dist = sum((m - c) ** 2 for m, c in zip(mixed, best))
+        for cand in candidates[1:]:
+            dist = sum((m - c) ** 2 for m, c in zip(mixed, cand))
+            if dist < best_dist:
+                best = cand
+                best_dist = dist
+        return list(best)
+
+    """ Source around default pixel E
+        ┌───┬───┬───┐
+        │ A │ B │ C │
+        ├───┼───┼───┤
+        │ D │ E │ F │
+        ├───┼───┼───┤
+        │ G │ H │ I │
+        └───┴───┴───┘
+
+        Result
+        ┌────┬────┐
+        │ r1 │ r2 │
+        ├────┼────┤
+        │ r3 │ r4 │
+        └────┴────┘ "Repeat edge" mode.
+    """
+    # ↓ starting new image list
+    scaled_image: list[list[list[int]]] = []
+
+    for y in range(Y):
+        row_up = image3d[max(y - 1, 0)]
+        row = image3d[y]
+        row_dn = image3d[min(y + 1, Y - 1)]
+
+        row_rez: list[list[int]] = []
+        row_dvo: list[list[int]] = []
+
+        for x in range(X):
+            xl = max(x - 1, 0)
+            xr = min(x + 1, X - 1)
+
+            # ↓ four-neighbourhood edge/corner detection
+            B = row_up[x]
+            D = row[xl]
+            E = row[x]
+            F = row[xr]
+            H = row_dn[x]
+
+            r1 = r2 = r3 = r4 = E
+
+            if B != H and D != F:
+                # ↓ weighted anti-aliasing mix instead of hard copy
+                if B == D:
+                    r1 = _mix(E, B)
+                if B == F:
+                    r2 = _mix(E, B)
+                if H == D:
+                    r3 = _mix(E, H)
+                if H == F:
+                    r4 = _mix(E, H)
+
+            if keep_palette and (r1 is not E or r2 is not E or r3 is not E or r4 is not E):
+                # ↓ snapping mixed colours to nearest source palette colour
+                A = row_up[xl]
+                C = row_up[xr]
+                G = row_dn[xl]
+                I = row_dn[xr]
+                candidates = list({tuple(p) for p in (A, B, C, D, E, F, G, H, I)})
+                if r1 is not E:
+                    r1 = _snap(r1, candidates)
+                if r2 is not E:
+                    r2 = _snap(r2, candidates)
+                if r3 is not E:
+                    r3 = _snap(r3, candidates)
+                if r4 is not E:
+                    r4 = _snap(r4, candidates)
+
+            row_rez.extend((r1, r2))
+            row_dvo.extend((r3, r4))
+
+        scaled_image.append(row_rez)
+        scaled_image.append(row_dvo)
+
+    return ('ok', scaled_image)
+
+
+# ↑ xBR-style rescaling two times finished
+
+
 # ↓ Dummy stub for standalone execution attempt
 if __name__ == '__main__':
     print('Module to be imported, not run as standalone.')
